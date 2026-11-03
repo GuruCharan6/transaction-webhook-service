@@ -1,124 +1,174 @@
 # Transaction Webhook Service
 
-A service that accepts payment-processor webhooks, acknowledges them in under
-500ms, and processes each one reliably in the background ~30 seconds later.
-Nothing is acknowledged until it is durably stored, and everything stored is
-eventually processed — even across a crash.
+Receives payment webhooks, replies `202` immediately, and processes each
+transaction exactly once about 30 seconds later, even if the server crashes
+mid-processing or the same webhook arrives 50 times at once.
 
-> **Live URL:** _not yet deployed — see [Deployment](#deployment)_
-> ```bash
-> curl -X POST https://<deployed-url>/v1/webhooks/transactions \
->   -H "Content-Type: application/json" \
->   -d '{"transaction_id":"txn_demo_001","source_account":"acc_user_789","destination_account":"acc_merchant_456","amount":150.50,"currency":"USD"}'
-> ```
+**Live:** https://transaction-webhook-service-twfw.onrender.com
 
-## Architecture
+```bash
+URL=https://transaction-webhook-service-twfw.onrender.com
 
-```
-Payment processor --POST webhook--> FastAPI service --insert once--> Postgres
-     (retries on failure)           (validate, store,        (system of record
-                                      reply 202)                + queue state)
-                                                                      |
-                                                     claims rows with a lease,
-                                                     then marks them PROCESSED
-                                                                      |
-                                                              Background worker
-                                                     (claim -> process 30s -> complete)
+curl -X POST $URL/v1/webhooks/transactions \
+  -H "Content-Type: application/json" \
+  -d '{"transaction_id":"txn_demo_001","source_account":"acc_user_789","destination_account":"acc_merchant_456","amount":150.50,"currency":"USD"}'
 
-If a worker crashes mid-processing: its lease expires after 60s and the
-next poll from any worker reclaims the row. No separate cleanup process.
+curl $URL/v1/transactions/txn_demo_001   # PROCESSING now, PROCESSED ~30s later
 ```
 
-The API and worker never talk to each other directly. The API writes a row,
-the worker finds it, and that row survives a restart of either process.
-Postgres is the only handoff — no Celery, no Redis, no message broker.
+## Results
 
-**Request flow:** webhook arrives -> row inserted with `ON CONFLICT DO
-NOTHING` (idempotency via primary key) -> 202 returned the instant the
-insert commits -> worker polls once a second, claims up to its free
-concurrency slots with `FOR UPDATE SKIP LOCKED` under a 60s lease -> waits
-30s (simulating the real external call) -> marks the row `PROCESSED` only if
-it still holds the lease.
+| Success criterion | Live (Render, Singapore) | Local (`scripts/run_all.py`) |
+|---|---|---|
+| Single transaction processed after ~30s | ✅ 30.2s from `created_at` to `processed_at` | ✅ 30.7s |
+| Duplicate prevention | ✅ 5 sequential + 50 concurrent identical webhooks: every response `202`, one row | ✅ same, `attempts = 1` |
+| Fast response under load | ✅ 120-160ms per request (from India) · ⚠️ bursts of 10+ simultaneous requests are slow on the free 0.1-CPU instance ([details](#performance)) | ✅ 100 concurrent: p50 137ms, p95 180ms, max 185ms |
+| No lost transactions | Verified locally (right) | ✅ worker killed mid-processing → still `PROCESSED`, `attempts = 2` · ✅ database stopped → `503`, nothing half-saved, worker resumes on its own |
 
-## Technical choices and trade-offs
+Plus 37 automated tests (`pytest`), all passing.
 
-| Decision | Choice | Rejected | Why |
+## How I approached it
+
+I wrote a short PRD before writing any code. The brief looks like "build
+three endpoints", but the hard part is one rule:
+
+> Nothing is acknowledged until it is durably stored, and everything stored is
+> eventually processed, exactly once.
+
+Every design choice follows from that rule:
+
+```mermaid
+flowchart LR
+    P[Payment processor] -->|POST webhook| A[FastAPI API]
+    A -->|INSERT ... ON CONFLICT DO NOTHING| D[(Postgres<br/>transactions table)]
+    A -->|202 after the insert commits| P
+    W[Background worker] -->|claim with FOR UPDATE SKIP LOCKED<br/>+ 60s lease| D
+    W -->|after 30s: mark PROCESSED<br/>only if it still holds the lease| D
+```
+
+- **Postgres is both the database and the queue.** One atomic `INSERT` saves
+  the transaction and queues it. With Celery + Redis there would be a gap
+  between "saved" and "queued" where a crash loses the job.
+- **Idempotency comes from the primary key.** `ON CONFLICT DO NOTHING` lets the
+  database reject duplicates, so 50 simultaneous copies can never create two
+  rows. A "check, then insert" approach has a race window.
+- **Workers claim rows with `FOR UPDATE SKIP LOCKED`.** Several workers can
+  run at once and never grab the same row.
+- **A 60-second lease handles crashes.** A claimed row records which worker
+  holds it and until when. If that worker dies, the lease expires and any
+  worker reclaims the row. No watchdog process needed.
+- **Completion is guarded.** `UPDATE ... WHERE locked_by = me`, so a worker
+  whose lease expired can't mark a row someone else now owns.
+
+| Decision | Chose | Over | Why |
 |---|---|---|---|
-| Queue | Postgres with `SKIP LOCKED` | Celery + Redis | One atomic write, no gap between saving and enqueueing, one less service |
-| Background work | Dedicated `asyncio` worker loop | FastAPI `BackgroundTasks` | In-memory tasks vanish on restart |
-| Idempotency | Primary key + `ON CONFLICT DO NOTHING` | Check-then-insert | The database stops races a check can't |
-| Crash recovery | Time-limited lease (`locked_until`) | Separate cleanup job | Abandoned rows become reclaimable with no extra process |
-| Concurrency | `asyncio` tasks per claimed row, bounded by a semaphore | One row at a time | The wait is pure I/O, so many rows can wait together |
-| DB access | `asyncpg` with plain SQL | Full ORM | The key queries (`SKIP LOCKED`, guarded updates) are Postgres-specific and should stay visible |
-| Money | `NUMERIC(18,2)` | `float` | Exact decimal storage, no rounding drift |
+| Queue | Postgres + `SKIP LOCKED` | Celery + Redis | No gap between saving and queueing; one less service |
+| Background work | Dedicated `asyncio` worker | FastAPI `BackgroundTasks` | In-memory tasks vanish on restart |
+| Crash recovery | Time-limited lease | Cleanup cron job | Abandoned rows become claimable automatically |
+| DB access | `asyncpg` + plain SQL in one file | ORM | The locking queries are Postgres-specific and should be visible |
+| Money | `NUMERIC(18,2)` | `float` | Exact decimals |
 
-**The trade-off to flag:** polling adds up to ~1s of delay, and Postgres
-won't scale like a dedicated broker. At much higher volume, keep the same
-insert-and-reply API and move delivery to a real queue (SQS/Kafka) behind an
-outbox table — the schema here already supports that migration since the row
-*is* the outbox entry.
+Trade-off: polling adds up to 1s of delay, and Postgres won't scale like a
+dedicated broker. At much higher volume I'd keep the same insert-and-reply
+API and move delivery to SQS/Kafka. The table already works as an outbox.
+
+## What testing caught
+
+Running the tests against real failures found bugs that a happy-path demo
+would have hidden:
+
+1. **~45ms wasted on every query.** I had set `statement_cache_size=0`,
+   which is only needed behind a pgbouncer pooler. With a direct connection it
+   made Postgres re-parse every statement. Removing it cut single inserts from
+   ~48ms to ~4ms.
+2. **The worker died permanently when the database went down.** One failed
+   claim query escaped the polling loop. Now it logs a warning and keeps
+   polling, and `test_worker_survives_claim_failures_and_recovers` plus the
+   end-to-end outage test prove it resumes.
+3. **A refused database connection returned `500` instead of `503`.** The
+   handler caught timeouts but not `OSError`. A `500` tells the payment
+   processor nothing useful; a `503` makes it retry.
+4. **An amount too large for the column came back as `503`.** It passed
+   validation, then failed in Postgres. It now returns `422`.
+5. **My own crash test was flaky.** It killed the worker after a fixed 10s,
+   which was sometimes before the worker had even claimed the row. It now
+   waits for a confirmed claim before killing.
+
+## Performance
+
+Live, from India to Render's Singapore region, free instance (0.1 CPU):
+
+| Load | Result |
+|---|---|
+| Single requests, one at a time | 120-160ms each (most of it is network round-trip) |
+| 10 simultaneous | p50 497ms, p95 1.75s |
+| 25 / 50 / 100 simultaneous | p95 3.2-4.5s |
+
+The slowdown under bursts comes from the free instance's CPU, not the
+application. Each request needs a few milliseconds of CPU for JSON parsing,
+validation and the insert. On a tenth of a core, 25 simultaneous requests
+queue for about 2 seconds. On a normal machine, the same code handles 100
+simultaneous requests at p95 180ms (measured in-process against real
+Postgres), and the database layer alone at p95 92ms. A paid instance with a
+full CPU, or a second instance, would remove the gap; `SKIP LOCKED` already
+makes multiple instances safe.
 
 ## Spec assumptions
 
-The brief leaves some points open; decisions made, and why:
-
-| Open point | Decision |
-|---|---|
-| Query response shape | Returns a one-item array (`[{...}]`), matching the brief exactly |
-| `amount` as both `1500` and `150.50` | Accept any decimal, store as `NUMERIC(18,2)`, reject >2 decimal places and anything too large for the column (`422`, not a confusing DB error) |
-| `currency` as both `INR` and `USD` | Accept any 3-letter alphabetic code, stored uppercase |
-| Health response's trailing comma in the brief | Treated as a typo; service returns valid JSON |
-| "Handle duplicates gracefully" | Always `202`, never `409` — a processor should never read an error as a reason to keep retrying |
-| `status` values | Only `PROCESSING` / `PROCESSED` are ever returned |
-
-## Project structure
-
-```
-app/
-  main.py        # FastAPI app, lifespan (starts/stops the worker)
-  routes.py       # The three endpoints
-  schemas.py      # Pydantic request/response models + validation
-  repository.py   # All SQL lives here
-  worker.py       # Claim -> process -> complete, with lease recovery
-  db.py           # asyncpg connection pool
-  config.py       # Environment-driven settings
-migrations/
-  001_init.sql    # Schema
-tests/
-  test_api.py         # Endpoint contracts, 404, array response shape
-  test_validation.py  # Every missing field, bad amounts/currencies, first-version-wins duplicates
-  test_idempotency.py # Sequential + 50-concurrent duplicate webhooks
-  test_worker.py      # Claim/process/complete, crash-lease reclaim
-  test_failures.py    # DB refused/hanging -> fast 503, health unaffected, worker survives outages
-scripts/
-  run_all.py          # One command: all four success criteria end to end, prints PASS/FAIL
-  smoke_test.sh       # Single webhook end to end against a running server
-  load_test.py        # Concurrent webhook response-time check
-  crash_test.py       # Kills and restarts the worker mid-processing
-  run_dev_windows.py  # Local-dev-only launcher (see note below)
-docker-compose.yml  # Local Postgres
-Dockerfile
-requirements.txt
-.env.example
-```
-
-## Configuration
-
-| Variable | Default | Purpose |
+| The brief says | I decided | Why |
 |---|---|---|
-| `DATABASE_URL` | — (required) | Postgres connection string |
-| `PROCESSING_DELAY_SECONDS` | 30 | Simulated external-call delay |
-| `LEASE_SECONDS` | 60 | How long a claim is held before another worker can reclaim it |
-| `POLL_INTERVAL_SECONDS` | 1 | How often the worker polls for pending rows |
-| `WORKER_CONCURRENCY` | 100 | Max rows processing at once |
-| `DB_POOL_SIZE` | 10 | Postgres connections per process |
-| `DB_QUERY_TIMEOUT_MS` | 300 | Webhook-insert query budget before returning 503 |
-| `STATEMENT_CACHE_SIZE` | 100 | Set to `0` only if deploying behind a transaction-mode pgbouncer (e.g. Supabase's pooler) — otherwise leave it on, it's a large perf win |
-| `RUN_EMBEDDED_WORKER` | true | Set `false` to run the API without its own worker (used by the crash test, so the worker process can be killed independently) |
+| Query response is an array `[{...}]` | Return a one-item array | Automated tests may parse this exact shape |
+| Amount is `1500` in one example, `150.50` in another | Accept decimals, max 2 places, store as `NUMERIC(18,2)` | Floats cause rounding errors with money |
+| Currency is `INR` in one example, `USD` in another | Accept any 3-letter code, store uppercase | They're examples, not fixed values |
+| Health response has a trailing comma | Return valid JSON | Typo |
+| Handle duplicates "gracefully" | Always `202`, never `409` | A processor may treat an error as a reason to retry |
+| Status is `PROCESSED` or `PROCESSING` | Only ever return those two | Extra states could fail a strict test |
 
-For fast local tests, set `PROCESSING_DELAY_SECONDS=1`.
+## FAQ
 
-## Run it locally
+**What happens if the worker dies at second 29?**
+The row stays `PROCESSING` with a lease that expires 60s after the claim.
+Once it expires, the next poll from any worker claims it again (`attempts`
+becomes 2), waits the 30s, and completes it. It finishes later, but it
+finishes, and exactly once.
+
+**What if the API restarts right after replying `202`?**
+Nothing is lost. The `202` is only sent after the insert commits, so the row
+is already in Postgres and the worker picks it up.
+
+**Why is the lease 60s when processing takes 30s?**
+The lease must outlast the work. If it were shorter, a slow but healthy
+worker could lose its row to a second worker mid-processing.
+
+**Could two workers process the same row?**
+No. `SKIP LOCKED` stops them claiming it at the same moment, the lease
+filter stops a second claim while the first is valid, and the guarded
+`UPDATE ... WHERE locked_by = me` stops a late worker from completing it.
+
+**What if the database is down?**
+Webhooks get `503` within 300ms, so the processor retries and nothing is
+falsely acknowledged. `GET /` still returns `200` because it never touches
+the database. The worker logs a warning each poll and resumes when the
+database comes back.
+
+## How I used AI
+
+I used Claude Code as a coding assistant. I wrote the PRD and made the design
+decisions (Postgres as the queue, the lease, the guarded completion). The AI
+wrote much of the code from that spec. I ran every test and benchmark myself,
+and when results looked wrong I dug into the cause rather than accepting them;
+the "What testing caught" list above came out of that.
+
+## What I'd add for production
+
+- Cap `attempts` and move repeat failures to a dead-letter table
+- Webhook signature verification (HMAC), left out here so plain test requests aren't rejected
+- Metrics and alerts: queue depth, processing latency, retry counts
+- Structured logs with `transaction_id` on every line
+- At higher volume, delivery via SQS/Kafka from the same table used as an outbox
+
+<details>
+<summary><b>Run it locally</b></summary>
 
 Prerequisites: Python 3.11+, Docker Desktop.
 
@@ -132,124 +182,114 @@ set -a; source .env; set +a
 uvicorn app.main:app --reload
 ```
 
-> **Windows-only note:** `scripts/run_dev_windows.py` switches asyncio to the
-> selector event loop before starting uvicorn. Plain `uvicorn app.main:app`
-> works fine on Windows too; this script exists only because the default
-> `ProactorEventLoop` handles very high simultaneous-connection counts
-> noticeably worse than Linux in local testing. The Docker image doesn't need
-> it — Linux containers use the standard loop.
-
-The worker starts automatically inside the API process. To run it as a
-separate process instead (used by the crash test):
+The table is created automatically on startup. The worker runs inside the
+API process. To run it as a separate process instead:
 
 ```bash
 RUN_EMBEDDED_WORKER=false uvicorn app.main:app     # terminal 1
 python -m app.worker                                # terminal 2
 ```
 
-## Run the tests
+On Windows, `python scripts/run_dev_windows.py` starts the server with the
+selector event loop, which handles many simultaneous local connections better
+than the default. Linux doesn't need it.
+
+</details>
+
+<details>
+<summary><b>Run the tests</b></summary>
+
+Unit and integration tests (37), using a fast 1s processing delay:
 
 ```bash
 docker compose up -d
-pip install -r requirements.txt
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/webhooks \
-PROCESSING_DELAY_SECONDS=1 LEASE_SECONDS=5 POLL_INTERVAL_SECONDS=0.2 \
-  pytest tests/ -v
+export DATABASE_URL=postgresql://postgres:postgres@localhost:5432/webhooks
+export PROCESSING_DELAY_SECONDS=1 LEASE_SECONDS=5 POLL_INTERVAL_SECONDS=0.2
+pytest tests/ -v
 ```
 
-37 tests, all passing:
-
-- API contracts: health, 202 on accept, 404 on unknown ID, one-item array response
-- Validation: each missing field, empty strings, amount `0` / negative / 3
-  decimals / too large / non-numeric, bad currency codes, uppercase storage,
-  and a duplicate with different details keeping the first version
-- Idempotency: 5 sequential and 50 concurrent identical webhooks leave one row
-- Worker: claim, process, complete, and reclaiming a row whose lease expired
-- Failures: a refused or hanging database returns `503` in under 500ms,
-  lookups return `503` too, the health check stays `200`, and the worker keeps
-  polling through repeated claim failures and finishes the row afterwards
-
-## Verify all four success criteria in one command
+All four success criteria end to end, with the real 30s delay and 60s lease
+(about 5 minutes). It starts from an empty table, manages the server and
+worker itself, stops and restarts Postgres for the outage check, and exits
+with code 0 only if everything passes:
 
 ```bash
-docker compose up -d
+unset PROCESSING_DELAY_SECONDS LEASE_SECONDS POLL_INTERVAL_SECONDS
 python scripts/run_all.py
 ```
 
-`run_all.py` takes about 5 minutes and uses the real 30s delay and 60s lease.
-It starts from an empty table, starts and stops the server and worker itself,
-stops and restarts Postgres for the outage check, and ends with a PASS/FAIL
-summary (exit code 0 only if everything passes). Unset any fast-test
-variables (`PROCESSING_DELAY_SECONDS` etc.) before running it.
-
-Individual scripts for checking one thing at a time:
+Individual checks against any running server, local or live:
 
 ```bash
-# Single webhook end to end against a running server (~35s)
-bash scripts/smoke_test.sh http://localhost:8000
-
-# Concurrent-load response-time check against a running server
-python scripts/load_test.py http://localhost:8000 100
-
-# Worker crash-recovery (kills the worker at second 10, restarts it)
-RUN_EMBEDDED_WORKER=false uvicorn app.main:app     # terminal 1
-python scripts/crash_test.py http://localhost:8000  # terminal 2
+bash scripts/smoke_test.sh $URL          # one webhook end to end (~35s)
+python scripts/load_test.py $URL 100     # concurrent response times
 ```
 
-### Results (local, Windows dev machine, Docker Desktop Postgres)
-
-From `run_all.py`:
-
-| Success criterion | Result |
+| Test file | Covers |
 |---|---|
-| Single transaction | `PROCESSED`, `processed_at - created_at` = 30.7s (own target 30-35s) |
-| Duplicate prevention | 5 sequential + 50 concurrent identical webhooks: every response `202`, one row each |
-| Performance, 100 concurrent webhooks | p50 137ms / p95 180ms / max 185ms (hard limit 500ms) |
-| Reliability: worker killed mid-processing | Row still reached `PROCESSED` with `attempts = 2`, one claim per worker |
-| Reliability: database stopped | Webhook got `503` (no false ack), health stayed `200`, nothing half-saved (`404` after recovery) |
+| `test_api.py` | Endpoint contracts, 404, array response shape |
+| `test_validation.py` | Every missing field, bad amounts and currencies, first-version-wins duplicates |
+| `test_idempotency.py` | Sequential and 50-concurrent duplicate webhooks |
+| `test_worker.py` | Claim, process, complete; reclaiming an expired lease |
+| `test_failures.py` | Database refused or hanging → fast `503`; health unaffected; worker survives outages |
 
-The performance row is measured in-process (the app and real Postgres, but no
-TCP sockets). Running the same 100 requests through real sockets against a
-local server on this Windows machine measured roughly 550-800ms. Isolated
-benchmarks traced that gap to Windows loopback and Docker Desktop connection
-setup, not to the application: the raw `asyncpg` pool alone handles the same
-100 inserts at p95 92ms. Linux containers, the deploy target, don't carry that
-cost. **The load test will be re-run against the deployed URL once live**, as
-the brief notes that network distance affects these numbers.
+</details>
 
-## Failure modes
+<details>
+<summary><b>Configuration</b></summary>
 
-| Failure | What happens | Result |
+| Variable | Default | Purpose |
 |---|---|---|
-| Duplicate webhook, incl. simultaneous | `ON CONFLICT DO NOTHING` skips the insert | One row, `202` every time |
-| Database down during a webhook | Handler returns `503` (refused or timed-out connection alike) | Processor retries, no false ack |
-| Slow database | Query times out at 300ms, inside the 500ms budget | `503`, response stays bounded |
-| Database down during processing | Worker logs a one-line warning and keeps polling | Work resumes by itself when the database returns |
-| Database down during a lookup | `GET /v1/transactions/{id}` returns `503` | Clear retry signal instead of a `500` |
-| Worker crash mid-processing | Lease expires after 60s | Another worker finishes the row |
-| API restart after `202` | Row already in Postgres | Worker picks it up |
-| Processing exception | Error saved, lease cleared | Row retried, `attempts` records it |
-| Worker loses its lease | Guarded `UPDATE` affects 0 rows | Only the current lease holder completes the row |
+| `DATABASE_URL` | required | Postgres connection string |
+| `PORT` | 8000 | Port the server listens on (set by the host) |
+| `PROCESSING_DELAY_SECONDS` | 30 | Simulated external call |
+| `LEASE_SECONDS` | 60 | How long a claim lasts before another worker can take the row |
+| `POLL_INTERVAL_SECONDS` | 1 | Time between claim attempts |
+| `WORKER_CONCURRENCY` | 100 | Max rows processing at once |
+| `DB_POOL_SIZE` | 10 | Database connections per process |
+| `DB_QUERY_TIMEOUT_MS` | 300 | Webhook insert time limit before returning `503` |
+| `STATEMENT_CACHE_SIZE` | 100 | Set to `0` only behind a transaction-mode pgbouncer (e.g. Supabase's pooler) |
+| `RUN_EMBEDDED_WORKER` | true | `false` runs the API without its worker |
 
-Unlimited retry is acceptable for this assessment. In production, cap
-`attempts` and move repeat failures to a dead-letter table.
+</details>
 
-## What I'd add for production
+<details>
+<summary><b>Project structure</b></summary>
 
-- Cap `attempts` and a dead-letter table for permanently failing rows
-- Webhook signature verification (HMAC) — explicitly out of scope here per
-  the brief, so the assessor's plain test requests aren't rejected
-- Structured logging / tracing with transaction_id correlation
-- Move the queue off Postgres polling to SQS/Kafka via an outbox table once
-  volume outgrows a single table scan
-- Metrics (queue depth, processing latency, retry counts) and alerting
-- Multiple worker processes/replicas — already safe today since `SKIP
-  LOCKED` coordinates them, just not provisioned here
-- Rate limiting and auth on the webhook endpoint
+```
+app/
+  main.py         FastAPI app; startup runs migrations, starts the worker
+  routes.py       The three endpoints
+  schemas.py      Request/response models and validation
+  repository.py   Every SQL query
+  worker.py       Claim -> process -> complete, with lease recovery
+  db.py           Connection pool and startup migrations
+  config.py       Settings from environment variables
+migrations/
+  001_init.sql    Schema (safe to re-run)
+tests/            37 tests, see "Run the tests"
+scripts/
+  run_all.py      All four success criteria end to end
+  smoke_test.sh   One webhook end to end
+  load_test.py    Concurrent response times
+  crash_test.py   Kill and restart the worker mid-processing
+Dockerfile
+docker-compose.yml   Local Postgres
+```
 
-## Deployment
+</details>
 
-Not yet deployed. Plan: one always-on container (no scale-to-zero — a cold
-start would fail the 500ms test on the first request) + managed Postgres,
-same region. `DATABASE_URL` set via the host's environment settings, never
-committed to the repo.
+<details>
+<summary><b>Deployment</b></summary>
+
+- **Render** free web service (Docker) + free Postgres, both in Singapore.
+- Render's free tier sleeps after 15 minutes without traffic, which would make
+  the first request slow. An UptimeRobot monitor pings `GET /` every 5 minutes
+  to keep it awake. That endpoint doesn't touch the database.
+- The table is created on startup (`migrations/*.sql`, safe to re-run, guarded
+  by a Postgres advisory lock so concurrent starts can't race).
+- `DATABASE_URL` uses Render's internal connection string, set in the Render
+  dashboard and never committed.
+- Render's free Postgres expires after 30 days.
+
+</details>
