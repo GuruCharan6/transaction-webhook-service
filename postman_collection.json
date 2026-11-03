@@ -1,0 +1,164 @@
+{
+  "info": {
+    "name": "Transaction Webhook Service",
+    "description": "Run top to bottom. Processing takes ~30s, so request 6 must be sent at least 30s after request 2: in the Collection Runner set Delay to 8000 ms, or when clicking by hand wait ~30s before sending request 6.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "https://transaction-webhook-service-twfw.onrender.com" },
+    { "key": "txnId", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "1. Health check",
+      "request": { "method": "GET", "url": "{{baseUrl}}/" },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('status is HEALTHY', () => pm.expect(pm.response.json().status).to.eql('HEALTHY'));",
+              "pm.test('has current_time', () => pm.expect(pm.response.json().current_time).to.be.a('string'));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Send webhook (new transaction)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/v1/webhooks/transactions",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"transaction_id\": \"{{txnId}}\",\n  \"source_account\": \"acc_user_789\",\n  \"destination_account\": \"acc_merchant_456\",\n  \"amount\": 150.50,\n  \"currency\": \"USD\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "exec": ["pm.collectionVariables.set('txnId', 'txn_postman_' + Date.now());"]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('202 Accepted', () => pm.response.to.have.status(202));",
+              "pm.test('acknowledges the transaction', () => {",
+              "  const body = pm.response.json();",
+              "  pm.expect(body.status).to.eql('accepted');",
+              "  pm.expect(body.transaction_id).to.eql(pm.collectionVariables.get('txnId'));",
+              "});",
+              "pm.test('responds within 500ms', () => pm.expect(pm.response.responseTime).to.be.below(500));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Send same webhook again (duplicate)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/v1/webhooks/transactions",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"transaction_id\": \"{{txnId}}\",\n  \"source_account\": \"acc_user_789\",\n  \"destination_account\": \"acc_merchant_456\",\n  \"amount\": 150.50,\n  \"currency\": \"USD\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "pm.test('duplicate still gets 202, no error', () => pm.response.to.have.status(202));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Get transaction (should be PROCESSING)",
+      "request": { "method": "GET", "url": "{{baseUrl}}/v1/transactions/{{txnId}}" },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const body = pm.response.json();",
+              "pm.test('200 OK', () => pm.response.to.have.status(200));",
+              "pm.test('one-item array (duplicate did not create a second row)', () => {",
+              "  pm.expect(body).to.be.an('array').with.lengthOf(1);",
+              "});",
+              "pm.test('still PROCESSING, processed_at is null', () => {",
+              "  pm.expect(body[0].status).to.eql('PROCESSING');",
+              "  pm.expect(body[0].processed_at).to.eql(null);",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "5. Invalid webhook (should be 422)",
+      "request": {
+        "method": "POST",
+        "url": "{{baseUrl}}/v1/webhooks/transactions",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"transaction_id\": \"txn_postman_invalid\",\n  \"source_account\": \"acc_user_789\",\n  \"destination_account\": \"acc_merchant_456\",\n  \"amount\": -5,\n  \"currency\": \"US\"\n}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": ["pm.test('422 for negative amount and bad currency', () => pm.response.to.have.status(422));"]
+          }
+        }
+      ]
+    },
+    {
+      "name": "6. Get transaction ~30s later (should be PROCESSED)",
+      "request": { "method": "GET", "url": "{{baseUrl}}/v1/transactions/{{txnId}}" },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": [
+              "const tx = pm.response.json()[0];",
+              "const waited = (Date.now() - new Date(tx.created_at)) / 1000;",
+              "pm.test('PROCESSED', () => {",
+              "  pm.expect(tx.status, `still PROCESSING: only ${waited.toFixed(0)}s since it was received; processing takes ~30s, wait and send this request again`).to.eql('PROCESSED');",
+              "});",
+              "if (tx.processed_at) {",
+              "  pm.test('processed about 30s after it was received', () => {",
+              "    const seconds = (new Date(tx.processed_at) - new Date(tx.created_at)) / 1000;",
+              "    console.log('processed_at - created_at =', seconds, 's');",
+              "    pm.expect(seconds).to.be.within(29, 40);",
+              "  });",
+              "}"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "7. Get unknown transaction (should be 404)",
+      "request": { "method": "GET", "url": "{{baseUrl}}/v1/transactions/does_not_exist" },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "exec": ["pm.test('404 Not Found', () => pm.response.to.have.status(404));"]
+          }
+        }
+      ]
+    }
+  ]
+}

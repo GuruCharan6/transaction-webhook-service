@@ -16,6 +16,14 @@ curl -X POST $URL/v1/webhooks/transactions \
 curl $URL/v1/transactions/txn_demo_001   # PROCESSING now, PROCESSED ~30s later
 ```
 
+**Or with Postman:** import [`postman_collection.json`](postman_collection.json)
+(already pointed at the live URL). It runs 7 requests covering every endpoint,
+each with automatic pass/fail checks: health, new webhook, duplicate, still
+processing, invalid input (`422`), processed ~30s later, unknown ID (`404`).
+Use **Run collection** with **Delay** set to `8000` ms, so request 6 arrives
+after processing finishes. To test a local server, change the collection's
+`baseUrl` variable to `http://localhost:8000`.
+
 ## Results
 
 | Success criterion | Live (Render, Singapore) | Local (`scripts/run_all.py`) |
@@ -25,7 +33,8 @@ curl $URL/v1/transactions/txn_demo_001   # PROCESSING now, PROCESSED ~30s later
 | Fast response under load | ✅ 120-160ms per request (from India) · ⚠️ bursts of 10+ simultaneous requests are slow on the free 0.1-CPU instance ([details](#performance)) | ✅ 100 concurrent: p50 137ms, p95 180ms, max 185ms |
 | No lost transactions | Verified locally (right) | ✅ worker killed mid-processing → still `PROCESSED`, `attempts = 2` · ✅ database stopped → `503`, nothing half-saved, worker resumes on its own |
 
-Plus 38 automated tests (`pytest`), all passing.
+Plus 38 automated tests (`pytest`), all passing, and a Postman collection
+whose checks all pass against the live service.
 
 ## How I approached it
 
@@ -269,6 +278,7 @@ scripts/
   smoke_test.sh   One webhook end to end
   load_test.py    Concurrent response times
   crash_test.py   Kill and restart the worker mid-processing
+postman_collection.json   Every endpoint with pass/fail checks
 Dockerfile
 docker-compose.yml   Local Postgres
 ```
