@@ -25,7 +25,7 @@ curl $URL/v1/transactions/txn_demo_001   # PROCESSING now, PROCESSED ~30s later
 | Fast response under load | ✅ 120-160ms per request (from India) · ⚠️ bursts of 10+ simultaneous requests are slow on the free 0.1-CPU instance ([details](#performance)) | ✅ 100 concurrent: p50 137ms, p95 180ms, max 185ms |
 | No lost transactions | Verified locally (right) | ✅ worker killed mid-processing → still `PROCESSED`, `attempts = 2` · ✅ database stopped → `503`, nothing half-saved, worker resumes on its own |
 
-Plus 37 automated tests (`pytest`), all passing.
+Plus 38 automated tests (`pytest`), all passing.
 
 ## How I approached it
 
@@ -90,7 +90,11 @@ would have hidden:
    processor nothing useful; a `503` makes it retry.
 4. **An amount too large for the column came back as `503`.** It passed
    validation, then failed in Postgres. It now returns `422`.
-5. **My own crash test was flaky.** It killed the worker after a fixed 10s,
+5. **The uptime monitor reported the live service as down.** It checks with
+   `HEAD` requests, and the health route only accepted `GET`, so every check
+   got `405`. The service was fine, but a monitoring blind spot like that hides
+   real outages. `/` now answers `HEAD` too.
+6. **My own crash test was flaky.** It killed the worker after a fixed 10s,
    which was sometimes before the worker had even claimed the row. It now
    waits for a confirmed claim before killing.
 
@@ -151,14 +155,6 @@ falsely acknowledged. `GET /` still returns `200` because it never touches
 the database. The worker logs a warning each poll and resumes when the
 database comes back.
 
-## How I used AI
-
-I used Claude Code as a coding assistant. I wrote the PRD and made the design
-decisions (Postgres as the queue, the lease, the guarded completion). The AI
-wrote much of the code from that spec. I ran every test and benchmark myself,
-and when results looked wrong I dug into the cause rather than accepting them;
-the "What testing caught" list above came out of that.
-
 ## What I'd add for production
 
 - Cap `attempts` and move repeat failures to a dead-letter table
@@ -199,7 +195,7 @@ than the default. Linux doesn't need it.
 <details>
 <summary><b>Run the tests</b></summary>
 
-Unit and integration tests (37), using a fast 1s processing delay:
+Unit and integration tests (38), using a fast 1s processing delay:
 
 ```bash
 docker compose up -d
@@ -267,7 +263,7 @@ app/
   config.py       Settings from environment variables
 migrations/
   001_init.sql    Schema (safe to re-run)
-tests/            37 tests, see "Run the tests"
+tests/            38 tests, see "Run the tests"
 scripts/
   run_all.py      All four success criteria end to end
   smoke_test.sh   One webhook end to end

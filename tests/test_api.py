@@ -10,6 +10,12 @@ async def test_health(pool):
         assert resp.json()["status"] == "HEALTHY"
 
 
+async def test_health_answers_head_for_uptime_monitors(pool):
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        resp = await c.head("/")
+        assert resp.status_code == 200
+
+
 async def test_webhook_accepted(pool):
     body = {
         "transaction_id": "txn_test_001",

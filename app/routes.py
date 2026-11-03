@@ -15,7 +15,7 @@ logger = logging.getLogger("routes")
 router = APIRouter()
 
 
-@router.get("/", response_model=HealthOut)
+@router.api_route("/", methods=["GET", "HEAD"], response_model=HealthOut)
 async def health() -> HealthOut:
     return HealthOut(current_time=datetime.now(UTC))
 
