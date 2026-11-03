@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.db import close_pool, init_pool
+from app.db import close_pool, init_pool, run_migrations
 from app.routes import router
 from app.worker import Worker
 
@@ -16,6 +16,7 @@ RUN_EMBEDDED_WORKER = os.environ.get("RUN_EMBEDDED_WORKER", "true").lower() != "
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    await run_migrations()
     await init_pool()
     worker_task = None
     worker = None
