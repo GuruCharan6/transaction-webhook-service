@@ -11,8 +11,8 @@ TXN_ID = f"txn_crash_{int(time.time())}"
 def main() -> None:
     body = {
         "transaction_id": TXN_ID,
-        "source_account": "acc_user_789",
-        "destination_account": "acc_merchant_456",
+        "source_account": "acc_cust_4821",
+        "destination_account": "acc_store_1093",
         "amount": 25.00,
         "currency": "INR",
     }

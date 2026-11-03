@@ -11,7 +11,7 @@ echo
 echo "== Send webhook =="
 STATUS=$(curl -s -o /tmp/smoke_resp.json -w "%{http_code}" -X POST "$BASE_URL/v1/webhooks/transactions" \
   -H "Content-Type: application/json" \
-  -d "{\"transaction_id\":\"$TXN_ID\",\"source_account\":\"acc_user_789\",\"destination_account\":\"acc_merchant_456\",\"amount\":150.50,\"currency\":\"USD\"}")
+  -d "{\"transaction_id\":\"$TXN_ID\",\"source_account\":\"acc_cust_4821\",\"destination_account\":\"acc_store_1093\",\"amount\":899.75,\"currency\":\"EUR\"}")
 cat /tmp/smoke_resp.json
 echo
 if [ "$STATUS" != "202" ]; then
@@ -26,7 +26,7 @@ echo
 echo "== Duplicate webhook (should still be 202, no error) =="
 curl -s -o /dev/null -w "status=%{http_code}\n" -X POST "$BASE_URL/v1/webhooks/transactions" \
   -H "Content-Type: application/json" \
-  -d "{\"transaction_id\":\"$TXN_ID\",\"source_account\":\"acc_user_789\",\"destination_account\":\"acc_merchant_456\",\"amount\":150.50,\"currency\":\"USD\"}"
+  -d "{\"transaction_id\":\"$TXN_ID\",\"source_account\":\"acc_cust_4821\",\"destination_account\":\"acc_store_1093\",\"amount\":899.75,\"currency\":\"EUR\"}"
 
 echo "== Waiting ~30s for processing =="
 sleep 32

@@ -94,10 +94,10 @@ def test_single_transaction():
     txn_id = f"txn_all_single_{uuid.uuid4().hex[:8]}"
     body = {
         "transaction_id": txn_id,
-        "source_account": "acc_user_789",
-        "destination_account": "acc_merchant_456",
-        "amount": 150.50,
-        "currency": "USD",
+        "source_account": "acc_cust_4821",
+        "destination_account": "acc_store_1093",
+        "amount": 899.75,
+        "currency": "EUR",
     }
     resp = httpx.post(f"{BASE_URL}/v1/webhooks/transactions", json=body, timeout=10)
     if resp.status_code != 202:
@@ -219,8 +219,8 @@ def test_crash_recovery():
         txn_id = f"txn_all_crash_{uuid.uuid4().hex[:8]}"
         body = {
             "transaction_id": txn_id,
-            "source_account": "acc_user_789",
-            "destination_account": "acc_merchant_456",
+            "source_account": "acc_cust_4821",
+            "destination_account": "acc_store_1093",
             "amount": 25.00,
             "currency": "INR",
         }

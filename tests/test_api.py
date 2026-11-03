@@ -21,8 +21,8 @@ async def test_webhook_accepted(pool):
         "transaction_id": "txn_test_001",
         "source_account": "acc_a",
         "destination_account": "acc_b",
-        "amount": 150.50,
-        "currency": "usd",
+        "amount": 899.75,
+        "currency": "eur",
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.post("/v1/webhooks/transactions", json=body)
@@ -36,7 +36,7 @@ async def test_webhook_validation_error(pool):
         "source_account": "acc_a",
         "destination_account": "acc_b",
         "amount": -5,
-        "currency": "US",
+        "currency": "EU",
     }
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         resp = await c.post("/v1/webhooks/transactions", json=body)

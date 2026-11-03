@@ -13,8 +13,8 @@ CONCURRENCY = int(sys.argv[2]) if len(sys.argv) > 2 else 100
 async def send_one(client: httpx.AsyncClient, i: int) -> float:
     body = {
         "transaction_id": f"txn_load_{uuid.uuid4().hex[:10]}_{i}",
-        "source_account": "acc_user_789",
-        "destination_account": "acc_merchant_456",
+        "source_account": "acc_cust_4821",
+        "destination_account": "acc_store_1093",
         "amount": 10.00,
         "currency": "INR",
     }

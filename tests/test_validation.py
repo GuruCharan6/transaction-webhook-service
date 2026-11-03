@@ -7,8 +7,8 @@ VALID = {
     "transaction_id": "txn_valid",
     "source_account": "acc_a",
     "destination_account": "acc_b",
-    "amount": 150.50,
-    "currency": "USD",
+    "amount": 899.75,
+    "currency": "EUR",
 }
 
 
@@ -41,9 +41,9 @@ async def test_missing_field_rejected(pool, missing):
         ("amount", 10.123),
         ("amount", 1e20),
         ("amount", "not-a-number"),
-        ("currency", "US"),
-        ("currency", "USDD"),
-        ("currency", "U1D"),
+        ("currency", "EU"),
+        ("currency", "EURO"),
+        ("currency", "E1R"),
     ],
 )
 async def test_invalid_value_rejected(pool, field, value):
@@ -55,7 +55,7 @@ async def test_invalid_value_rejected(pool, field, value):
     assert await row_count(pool, body["transaction_id"] or txn_id) == 0
 
 
-@pytest.mark.parametrize("amount", [1500, 150.5, 150.50, 0.01, 99999999.99])
+@pytest.mark.parametrize("amount", [2499, 899.7, 899.75, 0.01, 99999999.99])
 async def test_valid_amounts_accepted(pool, amount):
     txn_id = f"txn_amount_{str(amount).replace('.', '_')}"
     async with client() as c:

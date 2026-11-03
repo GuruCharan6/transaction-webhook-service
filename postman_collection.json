@@ -33,7 +33,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"transaction_id\": \"{{txnId}}\",\n  \"source_account\": \"acc_user_789\",\n  \"destination_account\": \"acc_merchant_456\",\n  \"amount\": 150.50,\n  \"currency\": \"USD\"\n}"
+          "raw": "{\n  \"transaction_id\": \"{{txnId}}\",\n  \"source_account\": \"acc_cust_4821\",\n  \"destination_account\": \"acc_store_1093\",\n  \"amount\": 899.75,\n  \"currency\": \"EUR\"\n}"
         }
       },
       "event": [
@@ -67,7 +67,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"transaction_id\": \"{{txnId}}\",\n  \"source_account\": \"acc_user_789\",\n  \"destination_account\": \"acc_merchant_456\",\n  \"amount\": 150.50,\n  \"currency\": \"USD\"\n}"
+          "raw": "{\n  \"transaction_id\": \"{{txnId}}\",\n  \"source_account\": \"acc_cust_4821\",\n  \"destination_account\": \"acc_store_1093\",\n  \"amount\": 899.75,\n  \"currency\": \"EUR\"\n}"
         }
       },
       "event": [
@@ -111,7 +111,7 @@
         "header": [{ "key": "Content-Type", "value": "application/json" }],
         "body": {
           "mode": "raw",
-          "raw": "{\n  \"transaction_id\": \"txn_postman_invalid\",\n  \"source_account\": \"acc_user_789\",\n  \"destination_account\": \"acc_merchant_456\",\n  \"amount\": -5,\n  \"currency\": \"US\"\n}"
+          "raw": "{\n  \"transaction_id\": \"txn_postman_invalid\",\n  \"source_account\": \"acc_cust_4821\",\n  \"destination_account\": \"acc_store_1093\",\n  \"amount\": -5,\n  \"currency\": \"EU\"\n}"
         }
       },
       "event": [

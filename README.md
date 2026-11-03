@@ -11,7 +11,7 @@ URL=https://transaction-webhook-service-twfw.onrender.com
 
 curl -X POST $URL/v1/webhooks/transactions \
   -H "Content-Type: application/json" \
-  -d '{"transaction_id":"txn_demo_001","source_account":"acc_user_789","destination_account":"acc_merchant_456","amount":150.50,"currency":"USD"}'
+  -d '{"transaction_id":"txn_demo_001","source_account":"acc_cust_4821","destination_account":"acc_store_1093","amount":899.75,"currency":"EUR"}'
 
 curl $URL/v1/transactions/txn_demo_001   # PROCESSING now, PROCESSED ~30s later
 ```
